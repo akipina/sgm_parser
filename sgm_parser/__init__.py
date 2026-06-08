@@ -5,13 +5,13 @@ Quick start::
 
     from sgm_parser import Sgm
 
-    model = Sgm.load("FuckyFish.sgm")
+    model = Sgm.load("Bullgator.sgm")
     print(model.format)            # 'BOBJ' (creature) or 'NOBS' (scene)
     print(model.dump())            # the whole chunk tree
     for c in model.connections:    # combine seams
         print(c.name, c.slot_label, c.host_bone)
 
-    model.materials[0].texture = "arapaima_torso.bmp"   # edit
+    model.materials[0].texture = "bullgator_torso.bmp"   # edit
     model.save("fixed.sgm")        # untouched chunks stay byte-identical
 
 Layers (low to high): :mod:`sgm_parser.binary` -> :mod:`sgm_parser.chunks` ->
