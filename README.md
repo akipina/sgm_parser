@@ -103,6 +103,40 @@ for anim in model.animations:
           f"{len(anim.tracks)} bone tracks")
 ```
 
+### Build a creature from scratch
+
+You can also assemble an `SgmModel` field by field and write it out. This minimal example
+makes a one-patch creature with a single bone and a textured material:
+
+```python
+from sgm_parser import SgmModel, Patch, Bone, Material, write_sgm_file
+
+model = SgmModel(name="Bullgator")
+
+# 16 mesh points form the control grid for one bicubic patch
+model.vertices = [(float(i % 4), float(i // 4), 0.0) for i in range(16)]
+
+# one material that references a diffuse texture
+model.materials = [Material(name="body", tags=[("TXTR", "bullgator_torso.bmp")])]
+model.material_index = ["body"]
+
+# one bicubic patch using all 16 control points, bound to material 0
+model.patches = [Patch(material_index=0, type=0,
+                       control_points=list(range(16)), uvs=[0.0] * 8)]
+
+# a single root bone that owns the whole mesh (identity transform)
+identity = [1, 0, 0, 0,  0, 1, 0, 0,  0, 0, 1, 0,  0, 0, 0, 1]
+model.bones = [Bone(name="root", parent=None, start_vertex=0, vertex_count=16,
+                    transform=identity, tail=[0.0, 1.0, 0.0])]
+
+write_sgm_file(model, "scratch.sgm")
+```
+
+This shows the shape of a model, not a game-ready creature — a real one needs proper
+geometry, skinning, limb slots, and combine sockets. For building those from an actual mesh,
+see [sgm_blender](https://github.com/akipina/sgm_blender), which generates all of it from a
+Blender cage.
+
 ## How saving works
 
 `write_sgm_file` rebuilds the file from the model, but only the parts you can edit are
