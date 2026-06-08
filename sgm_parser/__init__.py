@@ -30,7 +30,8 @@ from .creature import (
     SgmModel, Patch, Bone, Material, Texture, LimbConnection,
     Animation, BoneTrack, V1Channel, read_sgm, write_sgm, write_sgm_file,
 )
-from . import anim, creature
+from .ebp import Ebp, MotionNode, Event, retarget, build_creature_ebp
+from . import anim, creature, ebp
 
 __all__ = [
     "Sgm",
@@ -48,5 +49,7 @@ __all__ = [
     "SgmModel", "Patch", "Bone", "Material", "Texture", "LimbConnection",
     "Animation", "BoneTrack", "V1Channel",
     "read_sgm", "write_sgm", "write_sgm_file",
-    "creature", "anim",
+    # entity blueprint (.ebp) parser + generator
+    "Ebp", "MotionNode", "Event", "retarget", "build_creature_ebp",
+    "creature", "anim", "ebp",
 ]

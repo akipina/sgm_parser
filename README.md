@@ -178,6 +178,30 @@ stays loadable in the game's Object Editor.
 Both stock animation formats are supported on read: v1 (`VERS 0,0,0,1`) and v7
 (`VERS 0,0,0,7`).
 
+## Entity blueprints (`.ebp`)
+
+A creature's `.ebp` is the blueprint the game pairs with its `.sgm`: it holds the combiner
+icon, the motion tree (which behaviour state plays which animation), animation events bound to
+bones, and build info. Its animation/bone references **must exist in the paired `.sgm`** — a
+blueprint that names an animation or bone the model lacks crashes the game on combine.
+
+`sgm_parser.ebp` reads `.ebp` files (byte-faithful round-trip) and can **generate one matched
+to a model** — the core of what the Object Editor does:
+
+```python
+from sgm_parser import Ebp, build_creature_ebp
+
+ebp = Ebp.load("tuna.ebp")
+print([(mn.state, mn.anim) for mn in ebp.motion_nodes])   # motion tree
+print(ebp.animation_refs())                               # animations it needs
+
+# Build a blueprint for your model from a working creature as a template; every animation
+# and bone reference is retargeted to your model so nothing dangles:
+ebp = build_creature_ebp("MyCreature.sgm", template_ebp_path="tuna.ebp",
+                         template_sgm_path="tuna.sgm")
+ebp.save("MyCreature.ebp")
+```
+
 ## Inspecting the raw structure
 
 If you need to see the underlying chunk tree (for debugging or to check an unfamiliar file),
