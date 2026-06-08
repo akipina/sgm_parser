@@ -1,34 +1,17 @@
 # sgm_parser
 
-A small, modular, **pure-Python** reader/writer for *Impossible Creatures* (Relic, 2003)
-`.sgm` model files. It decodes the chunk tree into typed Python objects, lets you inspect
-or edit it, and writes it back out — **untouched chunks round-trip byte-for-byte**, so your
-edits stay surgical and the engine still loads the result.
+A pure-Python library for reading, editing, and writing *Impossible Creatures*
+(Relic, 2003) `.sgm` model files. Load a creature into plain Python objects, change what you
+need — textures, materials, the skeleton, animations — and write it back out.
 
-It is standard-library only (no third-party dependencies) and works on Python 3.8+.
+Standard library only, Python 3.8+.
 
 - **Repo:** <https://github.com/akipina/sgm_parser>
-- **Used by:** [sgm_explorer](https://github.com/akipina/sgm_explorer) (hex/chunk GUI) and
-  [sgm_blender](https://github.com/akipina/sgm_blender) (Blender import/export add-on).
+- **Used by:** [sgm_explorer](https://github.com/akipina/sgm_explorer) (a `.sgm` browser) and
+  [sgm_blender](https://github.com/akipina/sgm_blender) (a Blender import/export add-on).
 
-> This is an unofficial, fan-made tool for an old game. *Impossible Creatures* and the
-> `.sgm` format are property of their respective rights holders; this project ships no game
-> assets.
-
-## Highlights
-
-- **Byte-faithful round-trip.** Parse → save with no edits reproduces the input exactly.
-  Only chunks you actually modify are re-serialized; everything else is preserved verbatim.
-- **Two layers, pick your altitude:**
-  - a **low-level chunk tree** (`Sgm`) for inspection and surgical byte-level patching, and
-  - a **high-level creature model** (`read_sgm` → `SgmModel`) of typed dataclasses
-    (vertices, patches, bones, materials, textures, limbs, connections, animations) for
-    tools that build or rewrite whole creatures.
-- **Creatures *and* scenes.** Handles both `BOBJ` (creature) and `NOBS` (scene) containers.
-- **Animations decoded.** Both stock animation layouts — v1 (`VERS 0,0,0,1`) and v7
-  (`VERS 0,0,0,7`) — are understood by the creature model.
-- **Self-documenting.** `model.dump()` prints the whole chunk tree; `model.byte_account()`
-  reports where every byte went.
+This is an unofficial fan project and ships no game assets. *Impossible Creatures* and the
+`.sgm` format belong to their respective rights holders.
 
 ## Install
 
@@ -44,123 +27,102 @@ cd sgm_parser
 pip install -e .
 ```
 
-## Quick start
+## Getting started
+
+`read_sgm` turns a file into an `SgmModel`; `write_sgm_file` writes one back.
+
+```python
+from sgm_parser import read_sgm, write_sgm_file
+
+model = read_sgm("Bullgator.sgm")
+
+print(model.name)                 # the creature's name
+print(len(model.vertices))        # mesh size
+print(len(model.bones))           # skeleton
+print(len(model.animations))      # animations
+
+write_sgm_file(model, "Bullgator_copy.sgm")
+```
+
+An `SgmModel` is just a dataclass. Its main fields:
+
+| Field | What it holds |
+| --- | --- |
+| `name` | the creature name |
+| `vertices` | mesh points as `(x, y, z)` tuples |
+| `patches` | the bicubic Bezier surface patches |
+| `bones` | the skeleton (`Bone` objects: name, parent, transform, vertex range) |
+| `materials` | `Material` objects (name + tag list, see below) |
+| `textures` | embedded `Texture` images (TXMP: palette + mip levels) |
+| `limbs`, `limb_connections` | limb slots and the sockets where limbs combine |
+| `animations` | `Animation` objects (name, frame count, fps, per-bone tracks) |
+
+## Examples
+
+### Swap a texture and save
+
+A material's texture references live in its `tags` list as `(tag, filename)` pairs — `TXTR`
+is the diffuse map, `TXRF` reflection, `TXSP` specular. To point a material at a different
+diffuse texture:
+
+```python
+from sgm_parser import read_sgm, write_sgm_file
+
+model = read_sgm("Bullgator.sgm")
+
+mat = model.materials[0]
+mat.tags = [("TXTR", "bullgator_torso.bmp") if tag == "TXTR" else (tag, value)
+            for tag, value in mat.tags]
+
+write_sgm_file(model, "Bullgator_retex.sgm")
+```
+
+### Rename a creature
+
+```python
+from sgm_parser import read_sgm, write_sgm_file
+
+model = read_sgm("Bullgator.sgm")
+model.name = "Riverbull"
+write_sgm_file(model, "Riverbull.sgm")
+```
+
+### List materials and animations
+
+```python
+from sgm_parser import read_sgm
+
+model = read_sgm("Bullgator.sgm")
+
+for mat in model.materials:
+    textures = [name for tag, name in mat.tags if tag in ("TXTR", "TXRF", "TXSP")]
+    print(mat.name, textures)
+
+for anim in model.animations:
+    print(f"{anim.name}: {anim.frame_count} frames @ {anim.fps} fps, "
+          f"{len(anim.tracks)} bone tracks")
+```
+
+## How saving works
+
+`write_sgm_file` rebuilds the file from the model, but only the parts you can edit are
+reconstructed — chunks the model doesn't expose are carried through unchanged. In practice
+that means a load-edit-save cycle leaves everything except your edits intact, so the result
+stays loadable in the game's Object Editor.
+
+Both stock animation formats are supported on read: v1 (`VERS 0,0,0,1`) and v7
+(`VERS 0,0,0,7`).
+
+## Inspecting the raw structure
+
+If you need to see the underlying chunk tree (for debugging or to check an unfamiliar file),
+`Sgm` gives you the parsed layout:
 
 ```python
 from sgm_parser import Sgm
 
-model = Sgm.load("Bullgator.sgm")
-print(model.format)            # 'BOBJ' (creature) or 'NOBS' (scene)
-print(model.dump())            # the whole chunk tree, indented
-
-for c in model.connections:    # combine seams between limbs
-    print(c.name, c.slot_label, c.host_bone)
-
-model.materials[0].texture = "bullgator_torso.bmp"   # edit a diffuse texture name
-model.save("fixed.sgm")        # untouched chunks stay byte-identical
+print(Sgm.load("Bullgator.sgm").dump())   # the full chunk tree, indented
 ```
-
-## The `.sgm` format in one minute
-
-An `.sgm` file is a tree of **FORM/chunk** records, EA-IFF-85 style:
-
-- Each chunk has a **4-character tag** (e.g. `FORM`, `BOBJ`, `MTRL`, `TXMP`, `VERT`,
-  `ANIM`/`BANM`), a size, and a payload. `FORM` chunks contain children; others carry data.
-- The top-level container tag tells you the kind of file: **`BOBJ`** for a creature,
-  **`NOBS`** for a scene.
-- **Endianness gotcha:** chunk **sizes are big-endian**, but **numeric payload fields are
-  little-endian**. `sgm_parser` handles both for you; it matters mostly if you hand-patch
-  bytes elsewhere (see sgm_explorer).
-
-`sgm_parser` reads this tree once, keeps each chunk's original bytes, and only rebuilds the
-bytes of chunks you change.
-
-## Two APIs
-
-### 1. Low-level chunk tree — `Sgm`
-
-Best for inspection and minimal, surgical edits.
-
-```python
-from sgm_parser import Sgm
-
-m = Sgm.load("Bullgator.sgm")
-
-m.format                       # 'BOBJ' or 'NOBS'
-m.find("MTRL")                 # first chunk with this tag, or None
-m.find_all("TXMP")             # every chunk with this tag
-m.all_chunks()                 # flat list of every chunk in the tree
-m.dump()                       # pretty-printed tree as a string
-m.byte_account()               # dict: bytes accounted for, per tag
-
-# Convenience views (lists of the underlying chunk objects):
-m.vertices, m.materials, m.textures, m.bones, m.limbs, m.connections
-
-# Edit a typed chunk field, then write back:
-m.materials[0].texture = "bullgator_torso.bmp"
-data = m.to_bytes()            # serialize to bytes ...
-m.save("out.sgm")              # ... or straight to a file
-```
-
-### 2. High-level creature model — `read_sgm` / `write_sgm_file`
-
-Best for tools that assemble or rewrite a whole creature (this is the API the Blender
-add-on uses). Everything is plain dataclasses.
-
-```python
-from sgm_parser import read_sgm, write_sgm_file, SgmModel
-
-model = read_sgm("Bullgator.sgm")        # -> SgmModel
-model.name                                # creature name
-model.vertices                            # list[(x, y, z)]
-model.patches                             # bicubic Bezier patches
-model.bones                               # skeleton
-model.materials, model.textures           # typed Material / Texture
-model.limbs, model.limb_connections       # limb slots + combine sockets
-model.animations                          # decoded v1/v7 animations
-
-write_sgm_file(model, "rebuilt.sgm")      # or: data = write_sgm(model)
-```
-
-`SgmModel` fields: `version`, `name`, `vertices`, `patches`, `material_index`, `bones`,
-`materials`, `textures`, `limbs`, `limb_connections`, `animations` (plus a few raw
-pass-through fields for chunks that are preserved verbatim).
-
-## Architecture
-
-Layered, low to high — each layer depends only on the ones beneath it:
-
-| Layer | Module | Responsibility |
-| --- | --- | --- |
-| Bytes | `sgm_parser.binary` | `BinaryReader` / `BinaryWriter` (endian-aware primitives) |
-| Chunks | `sgm_parser.chunks` | the FORM/chunk tree, tag registry, typed chunk classes |
-| Parse | `sgm_parser.parser` | `ChunkParser` — bytes ⇄ chunk tree |
-| Model | `sgm_parser.model` | `Sgm` — the file-level object and convenience views |
-| Creature | `sgm_parser.creature`, `sgm_parser.anim` | `SgmModel` + `read_sgm`/`write_sgm` |
-
-## Project layout
-
-```
-sgm_parser/
-├── binary.py        # endian-aware read/write primitives
-├── constants.py     # tags, slot types, enums
-├── chunks/          # chunk classes + registry (base, common, creature, scene)
-├── parser.py        # ChunkParser: bytes <-> chunk tree
-├── model.py         # Sgm: file object, find/dump/byte_account, save/load
-├── creature.py      # SgmModel + read_sgm / write_sgm(_file)
-└── anim.py          # v1 / v7 animation channel semantics
-```
-
-## Round-trip guarantee (and how to verify it)
-
-```python
-from sgm_parser import Sgm
-raw = open("Bullgator.sgm", "rb").read()
-assert Sgm.from_bytes(raw).to_bytes() == raw   # byte-identical with no edits
-```
-
-Because only modified chunks are rebuilt, edits to one material or texture name won't
-perturb the bytes of any other chunk — which is what keeps engine-touchy files loadable.
 
 ## License
 
