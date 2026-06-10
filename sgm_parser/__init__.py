@@ -31,7 +31,10 @@ from .creature import (
     Animation, BoneTrack, V1Channel, read_sgm, write_sgm, write_sgm_file,
 )
 from .ebp import Ebp, MotionNode, Event, retarget, build_creature_ebp
-from . import anim, creature, ebp
+from .attributes import Attributes
+from .limbscale import LimbScale
+from .validate import check_model, check_creature_assets, write_torso_bmp
+from . import anim, creature, ebp, attributes, limbscale, luatable, validate
 
 __all__ = [
     "Sgm",
@@ -51,5 +54,9 @@ __all__ = [
     "read_sgm", "write_sgm", "write_sgm_file",
     # entity blueprint (.ebp) parser + generator
     "Ebp", "MotionNode", "Event", "retarget", "build_creature_ebp",
-    "creature", "anim", "ebp",
+    # creature definition files (.lua attributes, .lsc limb-scale)
+    "Attributes", "LimbScale",
+    # validation (every known in-game crash cause)
+    "check_model", "check_creature_assets", "write_torso_bmp",
+    "creature", "anim", "ebp", "attributes", "limbscale", "luatable", "validate",
 ]

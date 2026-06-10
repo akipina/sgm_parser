@@ -79,6 +79,27 @@ class Texture:
     palette: bytes
     mips: List[bytes]
 
+    def to_bmp(self, mip: int = 0) -> bytes:
+        """Encode one mip level as a standard 8-bit (paletted) Windows BMP.
+
+        The embedded palette is already in BMP's native B,G,R,reserved order, and each mip is
+        ``width*height`` 8-bit indices in top-down row order; a BMP stores rows bottom-up, so
+        the rows are flipped. This is exactly the form the in-game combiner wants for a
+        creature's external ``<Name>_torso.bmp`` skin (a missing one crashes the combiner)."""
+        w, h = self.width, self.height
+        for _ in range(mip):
+            w, h = max(1, w // 2), max(1, h // 2)
+        pixels = self.mips[mip]
+        if len(pixels) != w * h:
+            raise ValueError(f"mip {mip} is {len(pixels)} bytes, expected {w*h} ({w}x{h})")
+        if len(self.palette) != 256 * 4:
+            raise ValueError(f"to_bmp needs a 256-entry palette, got {len(self.palette)//4}")
+        pixoff = 14 + 40 + 1024
+        hdr = b"BM" + struct.pack("<IHHI", pixoff + w * h, 0, 0, pixoff)
+        hdr += struct.pack("<IiiHHIIiiII", 40, w, h, 1, 8, 0, w * h, 0, 0, 0, 0)
+        rows = b"".join(pixels[y * w:(y + 1) * w] for y in range(h - 1, -1, -1))  # bottom-up
+        return hdr + self.palette + rows
+
 
 @dataclass
 class Limb:

@@ -53,6 +53,27 @@ def _is_name(s: str) -> bool:
     return bool(s) and all(32 <= ord(c) < 127 for c in s)
 
 
+def _ebpd_name_span(raw: bytes):
+    """Locate the EBPD's trailing display-name field: ``<u32 charCount><UTF-16LE name><pad>``.
+    Returns ``(count_offset, string_end_offset, name)``. Stock EBPDs pad with 4 trailing nulls,
+    so that's tried first."""
+    for pad in (4, 0, 1, 2, 3, 5, 6, 7, 8):
+        str_end = len(raw) - pad
+        for n in range(1, 64):
+            cs = str_end - 2 * n
+            co = cs - 4
+            if co < 0:
+                break
+            if struct.unpack_from("<I", raw, co)[0] == n:
+                try:
+                    txt = raw[cs:str_end].decode("utf-16-le")
+                except UnicodeDecodeError:
+                    continue
+                if txt and all(32 <= ord(c) < 127 for c in txt):
+                    return co, str_end, txt
+    raise ValueError("could not locate EBPD name field")
+
+
 @dataclass
 class MotionNode:
     """One MTRE motion node: behaviour `state` -> `anim` plus opaque parameter bytes."""
@@ -137,6 +158,32 @@ class Ebp:
         'proc:' nodes, and nodes whose anim field isn't a clean name)."""
         return [mn.anim for mn in self.motion_nodes
                 if _is_name(mn.anim) and not mn.anim.startswith("proc:")]
+
+    # ---- display name (the EBPD trailing name field) ----
+    def _ebpd(self):
+        for c in self._sgm.all_chunks():
+            if c.tag == "EBPD":
+                return c
+        return None
+
+    @property
+    def creature_name(self) -> Optional[str]:
+        """The blueprint's display name. Stock creatures store a locale key like ``"$58033"``
+        (resolved to "Tuna" via the mod's text DLL); a literal (non-``$``) name shows verbatim."""
+        c = self._ebpd()
+        if c is None:
+            return None
+        return _ebpd_name_span(c.raw)[2]
+
+    @creature_name.setter
+    def creature_name(self, value: str) -> None:
+        c = self._ebpd()
+        if c is None:
+            raise ValueError("blueprint has no EBPD chunk")
+        co, str_end, _ = _ebpd_name_span(c.raw)
+        c.raw = (c.raw[:co] + struct.pack("<I", len(value))
+                 + value.encode("utf-16-le") + c.raw[str_end:])
+        c.mark_dirty()
 
 
 def retarget(template: Ebp, target_anims, target_bones, ref_bones=None) -> Ebp:
