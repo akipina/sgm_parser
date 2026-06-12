@@ -32,15 +32,34 @@ from .chunks.base import FormChunk
 
 
 def _lpstr(b: bytes, o: int):
-    """Read a u32-length-prefixed latin1 string at offset o; return (string, next_offset)."""
-    n = struct.unpack_from("<I", b, o)[0]
-    o += 4
-    return b[o:o + n].decode("latin1"), o + n
+    """Read a u32-length-prefixed latin1 string at offset o; return (string, next_offset).
+
+    IC ``.ebp`` come in two flavours: tool-generated/mod ones (e.g. the Object Editor's output)
+    store the length **little-endian**, while the stock ``EngineExtract`` creatures store it
+    **big-endian**. For the short ASCII names in MNOD/EVNT the two readings are never both plausible
+    (a real small length one way is a huge number the other way), so auto-detect by picking whichever
+    gives an in-range, in-bounds length -- preferring little-endian when both somehow fit."""
+    n_le = struct.unpack_from("<I", b, o)[0]
+    n_be = struct.unpack_from(">I", b, o)[0]
+    for n in (n_le, n_be):
+        if 0 <= n <= 0xFFFF and o + 4 + n <= len(b):
+            return b[o + 4:o + 4 + n].decode("latin1"), o + 4 + n
+    n = max(0, min(n_le, len(b) - o - 4))            # neither plausible: clamp, don't crash
+    return b[o + 4:o + 4 + n].decode("latin1", "ignore"), o + 4 + n
 
 
-def _put_lpstr(s: str) -> bytes:
+def _put_lpstr(s: str, big_endian: bool = False) -> bytes:
     e = s.encode("latin1")
-    return struct.pack("<I", len(e)) + e
+    return struct.pack(">I" if big_endian else "<I", len(e)) + e
+
+
+def _ebp_big_endian(sgm) -> bool:
+    """True if this blueprint stores chunk-internal string lengths big-endian (stock creatures) vs
+    little-endian (tool-generated). Detected from the first MNOD's leading length word."""
+    for c in sgm.all_chunks() if hasattr(sgm, "all_chunks") else []:
+        if c.tag == "MNOD" and len(c.raw) >= 4:
+            return struct.unpack_from(">I", c.raw, 0)[0] <= 0xFFFF
+    return False
 
 
 def _alpha(s: str) -> str:
