@@ -185,6 +185,37 @@ class Ebp:
                  + value.encode("utf-16-le") + c.raw[str_end:])
         c.mark_dirty()
 
+    # ---- combiner icon (the embedded paletted thumbnail in the EBPD) ----
+    def icon_span(self):
+        """`(pixel_start, width, height)` of the EBPD's embedded combiner icon, or None. The icon
+        is a paletted bitmap: a ``<u32 width><u32 height>`` header near the EBPD start, then
+        width*height 1-byte indices (top-down, row-major), then a 256-entry B,G,R,X palette."""
+        c = self._ebpd()
+        if c is None:
+            return None
+        raw = c.raw
+        for off in range(8, min(64, len(raw) - 8)):
+            w, h = struct.unpack_from("<II", raw, off)
+            if w == h and w in (16, 32, 48, 64, 96, 128) and off + 8 + w * h + 1024 <= len(raw):
+                return off + 8, w, h
+        return None
+
+    def set_icon(self, indices: bytes, palette: bytes) -> bool:
+        """Replace the EBPD's embedded combiner icon. ``indices`` = width*height 1-byte palette
+        indices (top-down, row-major); ``palette`` = 256*4 bytes in B,G,R,X order. The icon keeps
+        its existing dimensions (so ``indices`` must be exactly width*height). Returns True if the
+        icon was found and replaced; False otherwise (the original is left untouched)."""
+        span = self.icon_span()
+        if span is None:
+            return False
+        ps, w, h = span
+        if len(indices) != w * h or len(palette) != 256 * 4:
+            return False
+        c = self._ebpd()
+        c.raw = c.raw[:ps] + bytes(indices) + bytes(palette) + c.raw[ps + w * h + 1024:]
+        c.mark_dirty()
+        return True
+
 
 def retarget(template: Ebp, target_anims, target_bones, ref_bones=None) -> Ebp:
     """Rewrite `template` in place so every reference resolves against a target model.
