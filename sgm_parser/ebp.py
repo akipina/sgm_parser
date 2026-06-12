@@ -455,7 +455,14 @@ def build_ebp(sgm_data, name: str, *, durations=None,
     anim_names, dur = _sgm_animation_names(sgm)
     durations = durations or dur
 
-    bobj = _form("BOBJ", sgm.root_chunks)
+    # The embedded object is the .sgm's content under a single FORM BOBJ. A real .sgm file is
+    # already rooted at a FORM BOBJ, so embed THAT directly -- wrapping it again gives a nested
+    # BOBJ{BOBJ{...}} where the editor can't find the mesh (NULL pMesh -> AnimPose.cpp crash).
+    root = sgm.root_chunks
+    if len(root) == 1 and isinstance(root[0], FormChunk) and root[0].form_type == "BOBJ":
+        bobj = root[0]
+    else:
+        bobj = _form("BOBJ", root)
     mtre = build_motion_tree(anim_names, durations, big_endian=True)
     sigm = _form("SIGM", [mtre, _form("EVCT", [RawChunk("VERS", _EVCT_VERS)])])
     ebpc = _form("EBPC", [RawChunk("BLDI", _BLDI)])
