@@ -534,8 +534,14 @@ class InfoChunk(FourCCChunk):
 class PrimChunk(FourCCChunk):
     """The patch table: a count followed by one fixed 104-byte record per patch.
 
-    Each record (26 dwords): material index, a flag, the 16 control-point indices
-    of the bicubic Bezier patch, then 8 trailing parameter dwords (UV/normal data).
+    Each record (26 dwords): material index, the smoothing-group bitmask, the 16
+    control-point indices of the bicubic Bezier patch, then 8 UV floats (4 corner pairs).
+    The second dword (parsed as ``ptype`` / surfaced as ``Patch.type``) is the modeled
+    patch's **3ds Max ``Patch::smGroup``** — a 32-bit smoothing-group bitmask (each bit a
+    group, bit0 = group #1, default 1). Two adjacent patches are smooth-shaded across their
+    shared edge iff they share a bit, else the edge is hard/creased. It is NOT the Max
+    ``Face::flags`` word (no material-ID packed in the upper bits; material has its own
+    dword). See SGM_PATCH_FLAGS.md for the full reverse-engineering + sources.
     Decoded read-only (re-emits exact bytes); exposes ``patches`` as
     ``(material_index, [16 control-point indices])`` for combine analysis.
     """

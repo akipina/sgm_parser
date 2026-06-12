@@ -57,7 +57,9 @@ class Bone:
 @dataclass
 class Patch:
     material_index: int
-    type: int
+    type: int                 # 3ds Max Patch::smGroup — 32-bit smoothing-group bitmask
+                              # (bit0=group#1, default 1; shared bit => smooth edge, else hard).
+                              # See SGM_PATCH_FLAGS.md. (Kept named `type` for back-compat.)
     control_points: List[int]
     uvs: List[float]
 
