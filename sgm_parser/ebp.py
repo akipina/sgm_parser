@@ -271,7 +271,7 @@ class _NodeBuild:
     loop: bool = True                  # flags bit0 (+0x38)
     invert: bool = False               # flags bit1 (+0x4c) — melee AttackTime
     bit2: bool = False                 # flags bit2 (+0x8c)
-    x34: float = 0.0
+    x34: float = 1.0                   # playback rate (1.0 = normal; SwimIdle uses 0.25)
     blend: tuple = (0.0, 0.0, 0.0, 0.0)   # +0x54/0x58/0x5c/0x60
     weight: tuple = (1.0, 0.0)            # +0x78/0x7c
     fade: tuple = (0.5, 0.0)              # +0x80 fade-in / +0x84 fade-out
@@ -310,10 +310,18 @@ def build_motion_nodes(anim_names, durations=None) -> List[_NodeBuild]:
     fall back to a neutral default. Returns nodes in creation order with children
     referenced by state name."""
     have = {a.lower() for a in anim_names}
+    actual = {a.lower(): a for a in anim_names}
     dur = {k.lower(): v for k, v in (durations or {}).items()}
 
     def has(name):
         return name.lower() in have
+
+    def clip(*names):
+        """Actual-case clip name for the first variant the model has, else None."""
+        for n in names:
+            if n.lower() in actual:
+                return actual[n.lower()]
+        return None
 
     nodes: List[_NodeBuild] = []
     present = set()
@@ -355,12 +363,22 @@ def build_motion_nodes(anim_names, durations=None) -> List[_NodeBuild]:
                        fade=(0.2, 0.2), cond=(-1.0, 5.0), cond_var=V))
         add(_NodeBuild("Fly_Fast", anim="Fly", speed_ref=10.0, speed_var=V,
                        fade=(0.2, 0.0), cond=(5.0, -1.0), cond_var=V))
-    # --- attacks (AttackTime = clip_length * 0.5, playback inverted) ---
+    # --- attacks (AttackTime = clip_length * 0.5, playback inverted; child Idle_Pose) ---
+    pose = ["Idle_Pose"] if "Idle_Pose" in present else []
     for melee in ("Melee1", "Melee2", "MeleeLow1"):
         if has(melee):
             add(_NodeBuild(melee, anim=melee, loop=False, invert=True,
                            fade=(0.2, 0.2), speed_var="AttackTime",
-                           speed_ref=dur.get(melee.lower(), 1.0) * 0.5))
+                           speed_ref=dur.get(melee.lower(), 1.0) * 0.5, children=list(pose)))
+    # --- ability attacks/moves (templated from stock; gated on the clip existing) ---
+    leap = clip("leapattack", "LeapAttack", "Leapattack")
+    if leap:                                              # Leap ability — a simple leaf
+        add(_NodeBuild("Leap", anim=leap, fade=(0.2, 0.0)))
+    rng = clip("Range1")
+    if rng:                                               # ranged attack — melee-family + Idle_Pose
+        add(_NodeBuild("Range1", anim=rng, loop=False, invert=True, fade=(0.2, 0.2),
+                       speed_var="AttackTime", speed_ref=dur.get("range1", 1.0) * 0.5,
+                       children=list(pose)))
     # --- stumble / death ---
     if has("StumbleGetup"):
         add(_NodeBuild("Stumble", anim="StumbleGetup", loop=False, fade=(0.1, 0.2)))
@@ -378,6 +396,10 @@ def build_motion_nodes(anim_names, durations=None) -> List[_NodeBuild]:
     if has("Walk") or has("Run"):
         kids = [s for s in ("TargetLook", "SpineBend", "Run", "Walk", "Idle") if s in present]
         add(_NodeBuild("Move", children=kids))
+    charge = clip("charge", "Charge")
+    if charge:                                            # Charge ability — a Move-like locomotion group
+        kids = [s for s in ("SpineBend", "Run", "Walk", "Idle") if s in present]
+        add(_NodeBuild("Charge", anim=charge, weight=(1.0, 1.0), fade=(0.2, 0.0), children=kids))
 
     return nodes
 
