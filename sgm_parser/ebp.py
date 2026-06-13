@@ -484,6 +484,7 @@ def _sgm_animation_names(sgm: Sgm):
         if info is None:
             continue
         nm, o = _lpstr(info.raw, 0)
+        nm = nm.split("\x00", 1)[0].strip()   # names may be NUL-padded fixed-width (addon export)
         if not _is_name(nm):
             continue
         names.append(nm)
