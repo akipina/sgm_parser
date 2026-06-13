@@ -20,6 +20,7 @@ _TOKEN = re.compile(
     r"""
       [ \t\r\n]+                       # whitespace
     | --[^\n]*                         # line comment
+    | (?P<longstr>\[\[[\s\S]*?\]\])    # [[long string]] (Lua), may be empty / span lines
     | (?P<str>"(?:[^"\\]|\\.)*")       # "string"
     | (?P<num>-?\d+\.?\d*(?:[eE][-+]?\d+)?)
     | (?P<name>[A-Za-z_]\w*)           # bare identifier
@@ -73,6 +74,8 @@ class _Parser:
         kind, val = self._next()
         if kind == "str":
             return _unquote(val)
+        if kind == "longstr":
+            return val[2:-2]               # [[...]] -> raw inner text (no escape processing)
         if kind == "num":
             return _number(val)
         if val == "{":
