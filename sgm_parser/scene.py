@@ -44,6 +44,8 @@ class SceneMesh:
     # per-vertex skin: list of (bone_index, weight) pairs (empty list => rigid/unskinned)
     skin: List[List[Tuple[int, float]]] = field(default_factory=list)
     transform: Optional[List[float]] = None      # owning NODE's MTRX (3x4, row-major) if any
+    # morph targets (buildings: damage states). each is {vertex_index: (dx, dy, dz)} position deltas.
+    morphs: List["dict"] = field(default_factory=list)
 
     @property
     def skinned(self) -> bool:
@@ -69,7 +71,8 @@ class Scene:
     bones: List[SceneBone] = field(default_factory=list)
     textures: List[str] = field(default_factory=list)     # "Data:Art/Textures/NAME.txr"
     materials: List[str] = field(default_factory=list)     # SHDR names
-    material_textures: "dict" = field(default_factory=dict)  # SHDR name -> texture path (CHAN0)
+    material_textures: "dict" = field(default_factory=dict)  # SHDR name -> texture ref (path or name)
+    embedded_textures: "dict" = field(default_factory=dict)  # texture name -> (w, h, rgba) (buildings)
     animations: List = field(default_factory=list)         # anim.Animation (v7, decoded)
 
     @property
@@ -205,14 +208,25 @@ def _decode_bone(raw: bytes) -> Optional[SceneBone]:
         return None
 
 
-def read_txr(path: str):
-    """Decode an IC ``.txr`` texture into ``(width, height, rgba)``: top-down 8-bit RGBA bytes
-    of mip 0. ``.txr`` is an IFF ``FORM TXTR`` { NAME, VERS, DATA(16: flags,w,h,mipcount),
-    FORM IMAG* } where each IMAG's DATA is uncompressed w*h*4 BGRA. Returns None if unreadable."""
-    sgm = Sgm.load(path)
-    txtr = next(iter(_walk(sgm, "TXTR")), None)
-    if txtr is None:
-        return None
+def _decode_vtmp(raw: bytes) -> "dict":
+    """Decode a morph ``VTMP`` -> ``{vertex_index: (dx, dy, dz)}`` position deltas. Layout:
+    ``u32 count`` then ``count * (3 float delta + u32 vertex_index)``."""
+    out = {}
+    n = struct.unpack_from("<I", raw, 0)[0]
+    for k in range(n):
+        o = 4 + k * 16
+        if o + 16 > len(raw):
+            break
+        dx, dy, dz = struct.unpack_from("<3f", raw, o)
+        idx = struct.unpack_from("<I", raw, o + 12)[0]
+        out[idx] = (dx, dy, dz)
+    return out
+
+
+def decode_txtr(txtr: FormChunk):
+    """Decode a ``FORM TXTR`` (external ``.txr`` or embedded in a scene) into ``(width, height,
+    rgba)``: top-down 8-bit RGBA of mip 0. TXTR = { NAME, VERS, DATA(16: flags,w,h,mipcount),
+    FORM IMAG* }; each IMAG's DATA is uncompressed w*h*4 BGRA. Returns None if unreadable."""
     hdr = next((c for c in txtr.children if c.tag == "DATA" and len(c.raw) == 16), None)
     imag = next((c for c in txtr.children if isinstance(c, FormChunk) and c.form_type == "IMAG"), None)
     if hdr is None or imag is None:
@@ -228,6 +242,12 @@ def read_txr(path: str):
     rgba[2::4] = b[0:w * h * 4:4]      # B <- R
     rgba[3::4] = b[3:w * h * 4:4]      # A
     return w, h, bytes(rgba)
+
+
+def read_txr(path: str):
+    """Decode an external ``.txr`` file into ``(width, height, rgba)`` (mip 0)."""
+    txtr = next(iter(_walk(Sgm.load(path), "TXTR")), None)
+    return decode_txtr(txtr) if txtr is not None else None
 
 
 def _read_scene_animation(anim: FormChunk):
@@ -280,7 +300,12 @@ def read_scene(path: str) -> Scene:
         if data is None:
             continue
         name = nm.raw.split(b"\x00", 1)[0].decode("latin1", "ignore") if nm else ""
-        scene.meshes.append(decode_pmsh(data.raw, name))
+        mesh = decode_pmsh(data.raw, name)
+        for mr in (c for c in pm.children if isinstance(c, FormChunk) and c.form_type == "MRPH"):
+            vtmp = next((c for c in mr.children if c.tag == "VTMP"), None)
+            if vtmp is not None:
+                mesh.morphs.append(_decode_vtmp(vtmp.raw))
+        scene.meshes.append(mesh)
 
     scene.bones = [b for b in (_decode_bone(c.raw) for c in _walk(sgm, "BONE")) if b]
 
@@ -306,14 +331,30 @@ def read_scene(path: str) -> Scene:
             continue
         name = nm.raw.split(b"\x00", 1)[0].decode("latin1", "ignore")
         scene.materials.append(name)
-        # texture path lives in a CHAN as a LE length-prefixed "Data:..." string
+        # the diffuse texture ref is an LE length-prefixed string at offset 12 of a CHAN: a plain
+        # name ("Foundry_01.txr", buildings) or a "Data:Art/Textures/..." path (characters).
         for ch in (c for c in sh.children if c.tag == "CHAN"):
-            i = ch.raw.find(b"Data:")
-            if i >= 4:
-                n = struct.unpack_from("<I", ch.raw, i - 4)[0]
-                if 0 < n <= 256:
-                    scene.material_textures[name] = ch.raw[i:i + n].decode("latin1", "ignore")
+            if len(ch.raw) < 16:
+                continue
+            n = struct.unpack_from("<I", ch.raw, 12)[0]
+            if 0 < n <= 256:
+                ref = ch.raw[16:16 + n].decode("latin1", "ignore")
+                if ref.lower().endswith(".txr") or ref.startswith("Data:"):
+                    scene.material_textures[name] = ref
                     break
+    # embedded textures (buildings/props bundle their TXTR in the .sgm; keep the largest per name)
+    for t in _walk(sgm, "TXTR"):
+        nm = next((c for c in t.children if c.tag == "NAME"), None)
+        if nm is None:
+            continue
+        name = nm.raw.split(b"\x00", 1)[0].decode("latin1", "ignore")
+        dec = decode_txtr(t)
+        if dec is None:
+            continue
+        cur = scene.embedded_textures.get(name)
+        if cur is None or dec[0] * dec[1] > cur[0] * cur[1]:
+            scene.embedded_textures[name] = dec
+
     for a in _walk(sgm, "ANIM"):
         an = _read_scene_animation(a)
         if an is not None:
