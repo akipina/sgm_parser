@@ -153,20 +153,16 @@ def _read_anim_v1(anim: FormChunk) -> Optional[Animation]:
     return out
 
 
-def read_anim(anim: FormChunk, le_names: bool = False) -> Optional[Animation]:
+def read_anim(anim: FormChunk) -> Optional[Animation]:
     """Parse one ``FORM ANIM`` (an :class:`AnimChunk`) into an :class:`Animation`, or
-    return ``None`` if the layout doesn't line up so the caller keeps it verbatim.
-
-    ``le_names=True`` reads the INFO/BANM name length-prefixes little-endian — that's the
-    *scene* ``.sgm`` flavour (characters/gatherers); creatures use big-endian (the default)."""
-    _rdlen = _le if le_names else _be
+    return ``None`` if the layout doesn't line up so the caller keeps it verbatim."""
     vers, info = _children(anim)
     if vers is not None and len(vers.raw) >= 4 and tuple(vers.raw[:4]) == (0, 0, 0, 1):
         return _read_anim_v1(anim)
     if info is None:
         return None
     d = info.raw
-    nl = _rdlen(d, 0); o = 4 + nl
+    nl = _be(d, 0); o = 4 + nl
     if o + 16 > len(d):
         return None
     flags = _le(d, o); reserved = _le(d, o + 4); frame_count = _le(d, o + 8); fps = _f(d, o + 12); o += 16
@@ -191,7 +187,7 @@ def read_anim(anim: FormChunk, le_names: bool = False) -> Optional[Animation]:
         if c.tag != "BANM":
             out.trailing.append(c)
             continue
-        bd = c.raw; bnl = _rdlen(bd, 0); bo = 4 + bnl
+        bd = c.raw; bnl = _be(bd, 0); bo = 4 + bnl
         bname = bd[4:4 + bnl].decode("latin1", "ignore").rstrip("\x00")
         if bo + 12 > len(bd):
             return None
