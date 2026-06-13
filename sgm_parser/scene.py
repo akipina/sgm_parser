@@ -316,6 +316,85 @@ def patch_pmsh_geometry(data: bytes, positions=None, normals=None, uvs=None) -> 
     return bytes(b)
 
 
+def _pmsh_split(data: bytes):
+    """Split a PMSH DATA into (mask, end_of_submeshes_offset). The bytes from that offset to the end
+    are the per-bone trailing (skin palette etc.), independent of mesh topology -> preserved on rebuild."""
+    nv, mask = struct.unpack_from("<II", data, 0)
+    o = 8 + sum(nv * _ELEM_SIZE[b] for b in range(9) if mask >> b & 1)
+    nsub = struct.unpack_from("<I", data, o)[0]; o += 4
+    for _ in range(nsub):
+        n = struct.unpack_from("<I", data, o)[0]; o += 4 + n
+        ic = struct.unpack_from("<I", data, o)[0]; o += 4 + 2          # indexCount + u16 minIndex
+        k = struct.unpack_from("<I", data, o)[0]; o += 4
+        o += k * 8 + ic * 2                                            # LOD block + indices
+    return mask, o
+
+
+def build_pmsh_data(mask, positions, normals, uvs, skin, submeshes, trailing=b"") -> bytes:
+    """Serialize a PMSH DATA from scratch: header + SoA vertex streams (per the format mask) + per-
+    material submeshes (triangle indices, no LOD) + preserved per-bone trailing. ``submeshes`` is a
+    list of ``(shader_name, [(i,j,k), ...])``; ``skin`` is per-vertex ``[(bone_index, weight), ...]``
+    (ignored unless the mask sets the skin element). Mirrors the reader (ProgressiveMesh.cpp)."""
+    nv = len(positions)
+    out = bytearray(struct.pack("<II", nv, mask))
+    for bit in range(9):
+        if not (mask >> bit & 1):
+            continue
+        if bit == _POS:
+            for x, y, z in positions:
+                out += struct.pack("<3f", x, y, z)
+        elif bit == _NORMAL:
+            for x, y, z in (normals or [(0, 0, 1)] * nv):
+                out += struct.pack("<3f", x, y, z)
+        elif bit == _UV:
+            for u, v in (uvs or [(0, 0)] * nv):
+                out += struct.pack("<2f", u, v)
+        elif bit == _SKIN:
+            for infl in (skin or [[]] * nv):
+                top = sorted(infl, key=lambda t: -t[1])[:4]
+                s = sum(w for _, w in top) or 1.0
+                w = [wt / s for _, wt in top] + [0.0] * (4 - len(top))
+                b = [bi for bi, _ in top] + [255] * (4 - len(top))
+                out += struct.pack("<3f", w[0], w[1], w[2])
+                out += struct.pack("<4B", *[min(255, max(0, x)) for x in b])
+        else:
+            out += b"\x00" * (nv * _ELEM_SIZE[bit])       # unused elements (none in our assets)
+    out += struct.pack("<I", len(submeshes))
+    for name, tris in submeshes:
+        nm = name.encode("latin1", "ignore")
+        idx = [i for t in tris for i in t]
+        out += struct.pack("<I", len(nm)) + nm
+        out += struct.pack("<I", len(idx))
+        out += struct.pack("<H", min(idx) if idx else 0)
+        out += struct.pack("<I", 0)                        # K = 0: no progressive-LOD records
+        if idx:
+            out += struct.pack("<%dH" % len(idx), *idx)
+    out += trailing
+    return bytes(out)
+
+
+def write_scene_rebuilt(orig, old_nverts, positions, normals, uvs, skin, submeshes,
+                        textures=None) -> bytes:
+    """Re-emit a scene ``.sgm`` with the ``PMSH`` of ``old_nverts`` REBUILT from new mesh data (any
+    topology). Preserves that PMSH's format mask + per-bone trailing and the rest of the file
+    byte-for-byte. Use when topology changed; for reshape-only use ``write_scene_geometry``."""
+    sgm = Sgm.load(orig) if isinstance(orig, str) else Sgm.from_bytes(orig)
+    target = None
+    for pm in _walk(sgm, "PMSH"):
+        d = next((c for c in pm.children if c.tag == "DATA"), None)
+        if d is not None and struct.unpack_from("<I", d.raw, 0)[0] == old_nverts:
+            target = d
+            break
+    if target is None:
+        raise ValueError(f"no PMSH with {old_nverts} vertices found")
+    mask, end = _pmsh_split(target.raw)
+    target.raw = build_pmsh_data(mask, positions, normals, uvs, skin, submeshes, target.raw[end:])
+    target.mark_dirty()
+    if textures:
+        patch_scene_textures(sgm, textures)
+    return sgm.to_bytes()
+
+
 def write_scene_geometry(orig, nverts, positions, normals=None, uvs=None, textures=None) -> bytes:
     """Re-emit a scene ``.sgm`` (path or bytes) with the ``PMSH`` of ``nverts`` vertices patched to
     new ``positions`` (+ optional normals/UVs), and embedded textures replaced from ``textures``
