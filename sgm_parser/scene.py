@@ -20,6 +20,7 @@ from typing import List, Optional, Tuple
 
 from .model import Sgm
 from .chunks.base import FormChunk
+from . import anim as _anim
 
 # PMSH vertex elements, by format-mask bit -> byte size. Streams are structure-of-arrays:
 # for each set bit, the file holds vertexCount * size bytes, in bit order.
@@ -68,7 +69,11 @@ class Scene:
     bones: List[SceneBone] = field(default_factory=list)
     textures: List[str] = field(default_factory=list)     # "Data:Art/Textures/NAME.txr"
     materials: List[str] = field(default_factory=list)     # SHDR names
-    animations: List[str] = field(default_factory=list)    # ANIM clip names
+    animations: List = field(default_factory=list)         # anim.Animation (v7, decoded)
+
+    @property
+    def animation_names(self) -> List[str]:
+        return [a.name for a in self.animations]
 
 
 # --------------------------------------------------------------------------- helpers
@@ -201,10 +206,9 @@ def read_scene(path: str) -> Scene:
         nm = next((c for c in sh.children if c.tag == "NAME"), None)
         if nm is not None:
             scene.materials.append(nm.raw.split(b"\x00", 1)[0].decode("latin1", "ignore"))
+    # scene animations are creature v7 layout with little-endian name lengths
     for a in _walk(sgm, "ANIM"):
-        info = next((c for c in a.children if c.tag == "INFO"), None)
-        if info is not None:
-            n = struct.unpack_from("<I", info.raw, 0)[0]
-            scene.animations.append(
-                info.raw[4:4 + n].decode("latin1", "ignore").split("\x00", 1)[0])
+        an = _anim.read_anim(a, le_names=True)
+        if an is not None:
+            scene.animations.append(an)
     return scene
