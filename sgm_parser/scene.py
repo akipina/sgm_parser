@@ -73,7 +73,9 @@ class Scene:
     materials: List[str] = field(default_factory=list)     # SHDR names
     material_textures: "dict" = field(default_factory=dict)  # SHDR name -> texture ref (path or name)
     embedded_textures: "dict" = field(default_factory=dict)  # texture name -> (w, h, rgba) (buildings)
-    animations: List = field(default_factory=list)         # anim.Animation (v7, decoded)
+    animations: List = field(default_factory=list)         # anim.Animation (bone clips, characters)
+    # building damage-state clips: (name, {morph_index: weight}) decoded from CANM channels
+    morph_animations: List[Tuple[str, "dict"]] = field(default_factory=list)
 
     @property
     def animation_names(self) -> List[str]:
@@ -484,6 +486,36 @@ def read_scene(path: str) -> Scene:
 
     for a in _walk(sgm, "ANIM"):
         an = _read_scene_animation(a)
-        if an is not None:
-            scene.animations.append(an)
+        if an is not None and an.tracks:
+            scene.animations.append(an)            # bone clips (characters): has BANM tracks
+        else:                                      # no bone tracks -> a morph-weight clip (buildings)
+            mw = _read_morph_animation(a)
+            if mw is not None:
+                scene.morph_animations.append(mw)
     return scene
+
+
+def _read_morph_animation(anim: FormChunk):
+    """Decode a building ``ANIM`` whose ``CANM`` channels (type 2) set morph weights ->
+    ``(name, {morph_index: weight})``. Returns None if it has no morph channels."""
+    info = next((c for c in anim.children if c.tag == "INFO"), None)
+    if info is None:
+        return None
+    nl = struct.unpack_from("<I", info.raw, 0)[0]
+    name = info.raw[4:4 + nl].decode("latin1", "ignore").split("\x00", 1)[0]
+    weights = {}
+    for c in anim.children:
+        if c.tag != "CANM" or len(c.raw) < 8:
+            continue
+        typ = struct.unpack_from("<I", c.raw, 0)[0]
+        tnl = struct.unpack_from("<I", c.raw, 4)[0]
+        o = 8 + tnl
+        if typ != 2 or o + 12 > len(c.raw):       # type 2 = morph-weight channel
+            continue
+        midx = struct.unpack_from("<I", c.raw, o)[0]
+        kc = struct.unpack_from("<I", c.raw, o + 8)[0]
+        vals = [struct.unpack_from("<2f", c.raw, o + 12 + k * 8)[1]
+                for k in range(kc) if o + 12 + k * 8 + 8 <= len(c.raw)]
+        if vals:
+            weights[midx] = vals[-1]               # final weight this clip drives the morph to
+    return (name, weights) if weights else None
