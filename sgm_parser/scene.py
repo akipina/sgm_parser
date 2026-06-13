@@ -208,6 +208,84 @@ def _decode_bone(raw: bytes) -> Optional[SceneBone]:
         return None
 
 
+def _gen_mips_bgra(w, h, rgba):
+    """Build a mip chain (down to 1x1) of BGRA bytes from top-down RGBA mip 0. Box-filter 2x2."""
+    cur = bytearray(len(rgba))
+    cur[0::4] = rgba[2::4]; cur[1::4] = rgba[1::4]; cur[2::4] = rgba[0::4]; cur[3::4] = rgba[3::4]  # RGBA->BGRA
+    mips = [(w, h, bytes(cur))]
+    cw, ch, src = w, h, cur
+    while cw > 1 or ch > 1:
+        nw, nh = max(1, cw // 2), max(1, ch // 2)
+        dst = bytearray(nw * nh * 4)
+        for y in range(nh):
+            for x in range(nw):
+                sx, sy = x * 2, y * 2
+                for ch_i in range(4):
+                    s = 0; n = 0
+                    for dy in (0, 1):
+                        for dx in (0, 1):
+                            px, py = min(sx + dx, cw - 1), min(sy + dy, ch - 1)
+                            s += src[(py * cw + px) * 4 + ch_i]; n += 1
+                    dst[(y * nw + x) * 4 + ch_i] = s // n
+        mips.append((nw, nh, bytes(dst)))
+        cw, ch, src = nw, nh, dst
+    return mips
+
+
+def patch_scene_textures(sgm: Sgm, overrides: "dict") -> int:
+    """Replace embedded TXTR pixels in place from ``{name: (w, h, rgba_topdown)}``. Regenerates the
+    mip chain (RGBA->BGRA) and overwrites each IMAG's DATA when dimensions match. Returns the count
+    of textures patched."""
+    n = 0
+    for txtr in _walk(sgm, "TXTR"):
+        nm = next((c for c in txtr.children if c.tag == "NAME"), None)
+        if nm is None:
+            continue
+        name = nm.raw.split(b"\x00", 1)[0].decode("latin1", "ignore")
+        ov = overrides.get(name) or next((v for k, v in overrides.items() if k.lower() == name.lower()), None)
+        if ov is None:
+            continue
+        w, h, rgba = ov
+        imags = [c for c in txtr.children if isinstance(c, FormChunk) and c.form_type == "IMAG"]
+        hdr = next((c for c in txtr.children if c.tag == "DATA" and len(c.raw) == 16), None)
+        if not imags or hdr is None:
+            continue
+        if (struct.unpack_from("<I", hdr.raw, 4)[0], struct.unpack_from("<I", hdr.raw, 8)[0]) != (w, h):
+            continue                              # size changed -> skip (would need full rebuild)
+        mips = _gen_mips_bgra(w, h, rgba)
+        for imag, (mw, mh, bgra) in zip(imags, mips):
+            d = next((c for c in imag.children if c.tag == "DATA"), None)
+            if d is not None and len(d.raw) == len(bgra):
+                d.raw = bgra
+                d.mark_dirty()
+        n += 1
+    return n
+
+
+def encode_txr(w, h, rgba) -> bytes:
+    """Build a complete external ``.txr`` file (FORM NOBS + FORM TXTR with a BGRA mip chain) from
+    top-down RGBA mip 0. Used to write edited character textures back out."""
+    from .chunks.base import RawChunk
+    mips = _gen_mips_bgra(w, h, rgba)
+    txtr_children = [RawChunk("NAME", struct.pack("<I", 1) + b"\x00"),
+                     RawChunk("VERS", struct.pack("<I", 3)),
+                     RawChunk("DATA", struct.pack("<4I", 0, w, h, len(mips)))]
+    for mw, mh, bgra in mips:
+        imag = _form("IMAG", [RawChunk("NAME", b"\x00"), RawChunk("VERS", struct.pack("<I", 1)),
+                              RawChunk("ATTR", struct.pack("<4I", 0, mw, mh, len(bgra))),
+                              RawChunk("DATA", bgra)])
+        txtr_children.append(imag)
+    nobs = _form("NOBS", [])
+    txtr = _form("TXTR", txtr_children)
+    return Sgm([nobs, txtr]).to_bytes()
+
+
+def _form(form_type, children):
+    f = FormChunk(form_type, list(children), b"")
+    f.mark_dirty()
+    return f
+
+
 def patch_pmsh_geometry(data: bytes, positions=None, normals=None, uvs=None) -> bytes:
     """Overwrite a ``PMSH`` DATA's vertex streams in place (positions/normals/UVs), leaving the
     format mask, submeshes, indices, skin and trailing data byte-identical. Each list must have
@@ -236,10 +314,11 @@ def patch_pmsh_geometry(data: bytes, positions=None, normals=None, uvs=None) -> 
     return bytes(b)
 
 
-def write_scene_geometry(orig, nverts, positions, normals=None, uvs=None) -> bytes:
+def write_scene_geometry(orig, nverts, positions, normals=None, uvs=None, textures=None) -> bytes:
     """Re-emit a scene ``.sgm`` (path or bytes) with the ``PMSH`` of ``nverts`` vertices patched to
-    new ``positions`` (+ optional normals/UVs). Everything else is preserved byte-for-byte. This is
-    the reshape/retexture round-trip: only the parts that changed are rewritten."""
+    new ``positions`` (+ optional normals/UVs), and embedded textures replaced from ``textures``
+    ({name: (w, h, rgba)}). Everything else is preserved byte-for-byte -- the reshape/retexture
+    round-trip rewrites only what changed."""
     sgm = Sgm.load(orig) if isinstance(orig, str) else Sgm.from_bytes(orig)
     target = None
     for pm in _walk(sgm, "PMSH"):
@@ -251,6 +330,8 @@ def write_scene_geometry(orig, nverts, positions, normals=None, uvs=None) -> byt
         raise ValueError(f"no PMSH with {nverts} vertices found")
     target.raw = patch_pmsh_geometry(target.raw, positions, normals, uvs)
     target.mark_dirty()
+    if textures:
+        patch_scene_textures(sgm, textures)
     return sgm.to_bytes()
 
 

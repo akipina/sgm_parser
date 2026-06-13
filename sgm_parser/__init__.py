@@ -34,7 +34,7 @@ from .ebp import Ebp, MotionNode, Event, retarget, build_creature_ebp
 from .attributes import Attributes
 from .limbscale import LimbScale
 from .validate import check_model, check_creature_assets, write_torso_bmp
-from .scene import Scene, SceneMesh, SceneBone, Submesh, read_scene, is_scene, read_txr, write_scene_geometry, patch_pmsh_geometry
+from .scene import Scene, SceneMesh, SceneBone, Submesh, read_scene, is_scene, read_txr, write_scene_geometry, patch_pmsh_geometry, encode_txr, patch_scene_textures, decode_txtr
 from . import anim, creature, ebp, attributes, limbscale, luatable, validate, scene
 
 __all__ = [
