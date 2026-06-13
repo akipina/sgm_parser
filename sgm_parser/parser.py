@@ -36,10 +36,11 @@ class ChunkParser:
             body_start = pos + 8
             body_end = body_start + size
             if body_end > end:
-                raise ValueError(
-                    f"chunk '{tag}' at offset {pos} claims size {size}, "
-                    f"overrunning its container (end {end})"
-                )
+                # Truncated/short file (e.g. a cut-off extract like fx/bonfire.sgm): clamp to the
+                # bytes we actually have and read what's there, as the engine's IFF reader does.
+                # Valid files never overrun, so this only ever affects malformed ones; the clamped
+                # chunk becomes the last parsed (pos jumps to end), so nothing after is misread.
+                body_end = end
             chunks.append(self._build(data, tag, body_start, body_end))
             pos = body_end
         return chunks

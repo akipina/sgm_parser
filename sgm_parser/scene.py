@@ -231,6 +231,57 @@ def decode_pmsh(data: bytes, name: str = "", version: int = 0x200) -> SceneMesh:
     return mesh
 
 
+def decode_geom(data: bytes, name: str = "") -> SceneMesh:
+    """Decode a ``GEOM`` ``DATA`` blob (RenderAnim/Geometry.cpp) into a :class:`SceneMesh`. GEOM is
+    the alternate, non-progressive geometry container used by projectiles and many fx (vs PMSH).
+    Same header + SoA vertex streams as PMSH, but a SIMPLER submesh: ``shader-lpstr, u32 indexCount,
+    indexCount u16 indices`` with no minIndex/LOD block; then a trailing skeleton (``u32 boneCount``,
+    boneCount 3x4 matrices, and, when VERS>0x200, boneCount names) which we don't need for the mesh.
+    Verified byte-exact against the editor reader FUN_0050445f (smallrock/eel_area, VERS 0x202)."""
+    nverts, mask = struct.unpack_from("<II", data, 0)
+    o = 8
+    streams = {}
+    for b in range(9):
+        if mask >> b & 1:
+            streams[b] = o
+            o += nverts * _ELEM_SIZE[b]
+
+    mesh = SceneMesh(name=name)
+    if _POS not in streams or nverts == 0:    # no positions (e.g. box.sgm test file, VERS 0x20000)
+        return mesh
+    mesh.positions = [struct.unpack_from("<3f", data, streams[_POS] + i * 12) for i in range(nverts)]
+    if _NORMAL in streams:
+        no = streams[_NORMAL]
+        mesh.normals = [struct.unpack_from("<3f", data, no + i * 12) for i in range(nverts)]
+    if _UV in streams:
+        uo = streams[_UV]
+        mesh.uvs = [struct.unpack_from("<2f", data, uo + i * 8) for i in range(nverts)]
+    if _SKIN in streams:
+        so = streams[_SKIN]
+        skin = []
+        for i in range(nverts):
+            w0, w1, w2 = struct.unpack_from("<3f", data, so + i * 16)
+            idx = struct.unpack_from("<4B", data, so + i * 16 + 12)
+            w = [w0, w1, w2, max(0.0, 1.0 - (w0 + w1 + w2))]
+            skin.append([(bi, wt) for bi, wt in zip(idx, w) if bi != 0xFF and wt > 0.0])
+        mesh.skin = skin
+
+    nsub = struct.unpack_from("<I", data, o)[0]
+    o += 4
+    for _ in range(nsub):
+        shader, o = _lp_le(data, o)
+        shader = shader.split("\x00", 1)[0]
+        index_count = struct.unpack_from("<I", data, o)[0]
+        o += 4
+        if index_count == 0:
+            continue
+        idx = struct.unpack_from("<%dH" % index_count, data, o)
+        o += index_count * 2
+        tris = [(idx[t], idx[t + 1], idx[t + 2]) for t in range(0, index_count - 2, 3)]
+        mesh.submeshes.append(Submesh(material=shader, triangles=tris))
+    return mesh
+
+
 # --------------------------------------------------------------------------- bones
 def _decode_bone(raw: bytes) -> Optional[SceneBone]:
     """Scene ``BONE``: LE-lpstr name, u32 flags, u32 colour, i32 parent, then transform data.
@@ -567,6 +618,19 @@ def read_scene(path: str) -> Scene:
                 bi = struct.unpack_from("<I", bd.raw, 0)[0]
                 mesh.bind = None if bi == 0xFFFFFFFF else bi
         scene.meshes.append(mesh)
+
+    for gm in _walk(sgm, "GEOM"):             # alternate geometry container (projectiles, some fx)
+        nm = next((c for c in gm.children if c.tag == "NAME"), None)
+        data = next((c for c in gm.children if c.tag == "DATA"), None)
+        if data is None:
+            continue
+        name = _name_str(nm.raw) if nm else ""
+        try:
+            gmesh = decode_geom(data.raw, name)
+            if gmesh.positions:
+                scene.meshes.append(gmesh)
+        except (struct.error, IndexError, KeyError):
+            pass
 
     scene.bones = [b for b in (_decode_bone(c.raw) for c in _walk(sgm, "BONE")) if b]
 
