@@ -208,6 +208,52 @@ def _decode_bone(raw: bytes) -> Optional[SceneBone]:
         return None
 
 
+def patch_pmsh_geometry(data: bytes, positions=None, normals=None, uvs=None) -> bytes:
+    """Overwrite a ``PMSH`` DATA's vertex streams in place (positions/normals/UVs), leaving the
+    format mask, submeshes, indices, skin and trailing data byte-identical. Each list must have
+    exactly ``vertexCount`` entries (no topology change). Returns the new DATA bytes."""
+    b = bytearray(data)
+    nverts, mask = struct.unpack_from("<II", b, 0)
+    o, streams = 8, {}
+    for bit in range(9):
+        if mask >> bit & 1:
+            streams[bit] = o
+            o += nverts * _ELEM_SIZE[bit]
+    if positions is not None:
+        if len(positions) != nverts:
+            raise ValueError(f"positions: got {len(positions)}, mesh has {nverts} verts (topology changed)")
+        po = streams[_POS]
+        for i, (x, y, z) in enumerate(positions):
+            struct.pack_into("<3f", b, po + i * 12, x, y, z)
+    if normals is not None and _NORMAL in streams and len(normals) == nverts:
+        no = streams[_NORMAL]
+        for i, (x, y, z) in enumerate(normals):
+            struct.pack_into("<3f", b, no + i * 12, x, y, z)
+    if uvs is not None and _UV in streams and len(uvs) == nverts:
+        uo = streams[_UV]
+        for i, (u, v) in enumerate(uvs):
+            struct.pack_into("<2f", b, uo + i * 8, u, v)
+    return bytes(b)
+
+
+def write_scene_geometry(orig, nverts, positions, normals=None, uvs=None) -> bytes:
+    """Re-emit a scene ``.sgm`` (path or bytes) with the ``PMSH`` of ``nverts`` vertices patched to
+    new ``positions`` (+ optional normals/UVs). Everything else is preserved byte-for-byte. This is
+    the reshape/retexture round-trip: only the parts that changed are rewritten."""
+    sgm = Sgm.load(orig) if isinstance(orig, str) else Sgm.from_bytes(orig)
+    target = None
+    for pm in _walk(sgm, "PMSH"):
+        data = next((c for c in pm.children if c.tag == "DATA"), None)
+        if data is not None and struct.unpack_from("<I", data.raw, 0)[0] == nverts:
+            target = data
+            break
+    if target is None:
+        raise ValueError(f"no PMSH with {nverts} vertices found")
+    target.raw = patch_pmsh_geometry(target.raw, positions, normals, uvs)
+    target.mark_dirty()
+    return sgm.to_bytes()
+
+
 def _decode_vtmp(raw: bytes) -> "dict":
     """Decode a morph ``VTMP`` -> ``{vertex_index: (dx, dy, dz)}`` position deltas. Layout:
     ``u32 count`` then ``count * (3 float delta + u32 vertex_index)``."""
