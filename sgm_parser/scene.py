@@ -43,7 +43,8 @@ class SceneMesh:
     submeshes: List[Submesh] = field(default_factory=list)
     # per-vertex skin: list of (bone_index, weight) pairs (empty list => rigid/unskinned)
     skin: List[List[Tuple[int, float]]] = field(default_factory=list)
-    transform: Optional[List[float]] = None      # owning NODE's MTRX (3x4, row-major) if any
+    transform: Optional[List[float]] = None      # owning NODE's MTRX (3x4, 12 floats) if any
+    bind: Optional[int] = None                    # bone index this part is rigidly attached to (NODE BIND)
     # morph targets (buildings: damage states). each is {vertex_index: (dx, dy, dz)} position deltas.
     morphs: List["dict"] = field(default_factory=list)
 
@@ -101,6 +102,33 @@ def _lp_le(b: bytes, o: int) -> Tuple[str, int]:
     return b[o + 4:o + 4 + n].decode("latin1", "ignore"), o + 4 + n
 
 
+def _name_str(raw: bytes) -> str:
+    """Decode a NAME chunk. Scene NAMEs are LE length-prefixed (``u32 len + chars``); fall back to a
+    plain NUL-terminated string if the prefix doesn't match the payload size."""
+    if len(raw) >= 4:
+        n = struct.unpack_from("<I", raw, 0)[0]
+        if 0 < n <= len(raw) - 4:
+            return raw[4:4 + n].split(b"\x00", 1)[0].decode("latin1", "ignore")
+    return raw.split(b"\x00", 1)[0].decode("latin1", "ignore")
+
+
+def _iter_meshes(sgm: Sgm):
+    """Yield ``(pmsh_form, enclosing_node_or_None)`` for every PMSH. A PMSH under a ``FORM NODE``
+    carries that node's MTRX placement + BIND bone (multi-part structures, skinned characters); one
+    directly under SIGM has neither (static single-mesh buildings)."""
+    out = []
+    def rec(c, node):
+        if isinstance(c, FormChunk):
+            if c.form_type == "PMSH":
+                out.append((c, node))
+            nxt = c if c.form_type == "NODE" else node
+            for ch in c.children:
+                rec(ch, nxt)
+    for c in sgm.root_chunks:
+        rec(c, None)
+    return out
+
+
 def is_scene(sgm: Sgm) -> bool:
     """True if this ``.sgm`` is a scene (NOBS/SIGM) rather than a creature (BOBJ)."""
     tops = [c.form_type for c in sgm.root_chunks if isinstance(c, FormChunk)]
@@ -143,8 +171,13 @@ def validate(scene: "Scene") -> List[str]:
 
 
 # --------------------------------------------------------------------------- PMSH
-def decode_pmsh(data: bytes, name: str = "") -> SceneMesh:
-    """Decode one ``PMSH`` ``DATA`` blob (ProgressiveMesh) into a :class:`SceneMesh`."""
+def decode_pmsh(data: bytes, name: str = "", version: int = 0x200) -> SceneMesh:
+    """Decode one ``PMSH`` ``DATA`` blob (ProgressiveMesh) into a :class:`SceneMesh`.
+
+    ``version`` is the PMSH ``VERS`` (e.g. 0x200 = v2.0, 0x102 = v1.2). The vertex streams are the
+    same structure-of-arrays in both; only the per-submesh header differs (recovered from the
+    ObjectEditor reader FUN_0052e6e6): v2.0 = ``u32 indexCount, u16 minIndex, u32 K [, K*8 LOD]``;
+    v1.2 = ``u32 x4 (skipped), u32 indexCount, u32 (skipped)`` and no LOD block."""
     nverts, mask = struct.unpack_from("<II", data, 0)
     o = 8
     streams = {}
@@ -172,16 +205,23 @@ def decode_pmsh(data: bytes, name: str = "") -> SceneMesh:
             skin.append([(bi, wt) for bi, wt in zip(idx, w) if bi != 0xFF and wt > 0.0])
         mesh.skin = skin
 
+    legacy = version < 0x200
     nsub = struct.unpack_from("<I", data, o)[0]
     o += 4
     for _ in range(nsub):
         shader, o = _lp_le(data, o)
-        index_count = struct.unpack_from("<I", data, o)[0]
-        o += 4 + 2                            # u32 index_count, then a u16
-        k = struct.unpack_from("<I", data, o)[0]
-        o += 4
-        if k:
-            o += k * 8                        # skin/remap block, skipped
+        shader = shader.split("\x00", 1)[0]   # v1.2 lengths include the NUL terminator
+        if legacy:                            # v1.2: skip 4 u32, indexCount, skip 1 u32; no LOD block
+            o += 16
+            index_count = struct.unpack_from("<I", data, o)[0]
+            o += 4 + 4
+        else:                                 # v2.0: indexCount, u16 minIndex, K [, K*8 LOD records]
+            index_count = struct.unpack_from("<I", data, o)[0]
+            o += 4 + 2
+            k = struct.unpack_from("<I", data, o)[0]
+            o += 4
+            if k:
+                o += k * 8
         if index_count == 0:
             continue
         idx = struct.unpack_from("<%dH" % index_count, data, o)
@@ -502,17 +542,27 @@ def read_scene(path: str) -> Scene:
         raise ValueError("not a scene .sgm (looks like a creature BOBJ); use read_sgm()")
     scene = Scene()
 
-    for pm in _walk(sgm, "PMSH"):
+    for pm, node in _iter_meshes(sgm):
         nm = next((c for c in pm.children if c.tag == "NAME"), None)
         data = next((c for c in pm.children if c.tag == "DATA"), None)
+        vrs = next((c for c in pm.children if c.tag == "VERS"), None)
         if data is None:
             continue
-        name = nm.raw.split(b"\x00", 1)[0].decode("latin1", "ignore") if nm else ""
-        mesh = decode_pmsh(data.raw, name)
+        version = struct.unpack_from("<I", vrs.raw, 0)[0] if vrs and len(vrs.raw) >= 4 else 0x200
+        name = _name_str(nm.raw) if nm else ""
+        mesh = decode_pmsh(data.raw, name, version)
         for mr in (c for c in pm.children if isinstance(c, FormChunk) and c.form_type == "MRPH"):
             vtmp = next((c for c in mr.children if c.tag == "VTMP"), None)
             if vtmp is not None:
                 mesh.morphs.append(_decode_vtmp(vtmp.raw))
+        if node is not None:                  # NODE-wrapped part: capture its placement + bone binding
+            mt = next((c for c in node.children if c.tag == "MTRX"), None)
+            if mt is not None and len(mt.raw) >= 48:
+                mesh.transform = list(struct.unpack_from("<12f", mt.raw, 0))
+            bd = next((c for c in node.children if c.tag == "BIND"), None)
+            if bd is not None and len(bd.raw) >= 4:
+                bi = struct.unpack_from("<I", bd.raw, 0)[0]
+                mesh.bind = None if bi == 0xFFFFFFFF else bi
         scene.meshes.append(mesh)
 
     scene.bones = [b for b in (_decode_bone(c.raw) for c in _walk(sgm, "BONE")) if b]
