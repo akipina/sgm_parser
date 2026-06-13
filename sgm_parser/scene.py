@@ -101,6 +101,41 @@ def is_scene(sgm: Sgm) -> bool:
     return "NOBS" in tops or "SIGM" in tops
 
 
+def validate(scene: "Scene") -> List[str]:
+    """Sanity-check a decoded scene before it's imported. Returns a list of human-readable
+    problems (empty == looks good). Catches the failure modes that show up as a collapsed or
+    asymmetric mesh: degenerate geometry, skin weights that don't sum to ~1 (Armature modifier
+    shrinks those verts toward the origin), out-of-range bone indices, broken bone hierarchy."""
+    out: List[str] = []
+    for m in scene.meshes:
+        if not m.positions:
+            out.append(f"mesh '{m.name}': no vertices"); continue
+        xs = [p[0] for p in m.positions]; ys = [p[1] for p in m.positions]; zs = [p[2] for p in m.positions]
+        dims = (max(xs) - min(xs), max(ys) - min(ys), max(zs) - min(zs))
+        if max(dims) < 1e-3:
+            out.append(f"mesh '{m.name}': degenerate bbox {tuple(round(d, 3) for d in dims)}")
+        ntri = sum(len(s.triangles) for s in m.submeshes)
+        if ntri == 0:
+            out.append(f"mesh '{m.name}': no triangles")
+        if m.skin and any(m.skin):
+            bad = sum(1 for infl in m.skin if infl and abs(sum(w for _, w in infl) - 1.0) > 0.05)
+            if bad:
+                out.append(f"mesh '{m.name}': {bad}/{len(m.skin)} verts' skin weights don't sum to 1")
+            if scene.bones:
+                oor = sum(1 for infl in m.skin for bi, _ in infl if not 0 <= bi < len(scene.bones))
+                if oor:
+                    out.append(f"mesh '{m.name}': {oor} skin influences reference a missing bone")
+            # rough left/right symmetry about x=0 (characters/gatherers should be ~symmetric)
+            pts = {(round(x, 2), round(y, 2), round(z, 2)) for x, y, z in m.positions}
+            mir = sum(1 for x, y, z in m.positions if (round(-x, 2), round(y, 2), round(z, 2)) in pts)
+            if mir < 0.6 * len(m.positions):
+                out.append(f"mesh '{m.name}': only {100*mir//len(m.positions)}% x-symmetric (expected a symmetric body)")
+    for i, b in enumerate(scene.bones):
+        if b.parent != -1 and not 0 <= b.parent < len(scene.bones):
+            out.append(f"bone '{b.name}': bad parent index {b.parent}")
+    return out
+
+
 # --------------------------------------------------------------------------- PMSH
 def decode_pmsh(data: bytes, name: str = "") -> SceneMesh:
     """Decode one ``PMSH`` ``DATA`` blob (ProgressiveMesh) into a :class:`SceneMesh`."""
