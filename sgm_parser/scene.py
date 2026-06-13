@@ -69,6 +69,7 @@ class Scene:
     bones: List[SceneBone] = field(default_factory=list)
     textures: List[str] = field(default_factory=list)     # "Data:Art/Textures/NAME.txr"
     materials: List[str] = field(default_factory=list)     # SHDR names
+    material_textures: "dict" = field(default_factory=dict)  # SHDR name -> texture path (CHAN0)
     animations: List = field(default_factory=list)         # anim.Animation (v7, decoded)
 
     @property
@@ -204,6 +205,31 @@ def _decode_bone(raw: bytes) -> Optional[SceneBone]:
         return None
 
 
+def read_txr(path: str):
+    """Decode an IC ``.txr`` texture into ``(width, height, rgba)``: top-down 8-bit RGBA bytes
+    of mip 0. ``.txr`` is an IFF ``FORM TXTR`` { NAME, VERS, DATA(16: flags,w,h,mipcount),
+    FORM IMAG* } where each IMAG's DATA is uncompressed w*h*4 BGRA. Returns None if unreadable."""
+    sgm = Sgm.load(path)
+    txtr = next(iter(_walk(sgm, "TXTR")), None)
+    if txtr is None:
+        return None
+    hdr = next((c for c in txtr.children if c.tag == "DATA" and len(c.raw) == 16), None)
+    imag = next((c for c in txtr.children if isinstance(c, FormChunk) and c.form_type == "IMAG"), None)
+    if hdr is None or imag is None:
+        return None
+    w, h = struct.unpack_from("<I", hdr.raw, 4)[0], struct.unpack_from("<I", hdr.raw, 8)[0]
+    px = next((c for c in imag.children if c.tag == "DATA"), None)
+    if px is None or len(px.raw) < w * h * 4 or w * h == 0:
+        return None
+    b = px.raw
+    rgba = bytearray(w * h * 4)
+    rgba[0::4] = b[2:w * h * 4:4]      # R <- B
+    rgba[1::4] = b[1:w * h * 4:4]      # G
+    rgba[2::4] = b[0:w * h * 4:4]      # B <- R
+    rgba[3::4] = b[3:w * h * 4:4]      # A
+    return w, h, bytes(rgba)
+
+
 def _read_scene_animation(anim: FormChunk):
     """Decode one scene ``FORM ANIM`` into an :class:`Animation`. Scene animations are the v7
     layout (root world translation + per-bone rotation, normalized time) with **little-endian**
@@ -276,8 +302,18 @@ def read_scene(path: str) -> Scene:
         scene.textures.append(s)
     for sh in _walk(sgm, "SHDR"):
         nm = next((c for c in sh.children if c.tag == "NAME"), None)
-        if nm is not None:
-            scene.materials.append(nm.raw.split(b"\x00", 1)[0].decode("latin1", "ignore"))
+        if nm is None:
+            continue
+        name = nm.raw.split(b"\x00", 1)[0].decode("latin1", "ignore")
+        scene.materials.append(name)
+        # texture path lives in a CHAN as a LE length-prefixed "Data:..." string
+        for ch in (c for c in sh.children if c.tag == "CHAN"):
+            i = ch.raw.find(b"Data:")
+            if i >= 4:
+                n = struct.unpack_from("<I", ch.raw, i - 4)[0]
+                if 0 < n <= 256:
+                    scene.material_textures[name] = ch.raw[i:i + n].decode("latin1", "ignore")
+                    break
     for a in _walk(sgm, "ANIM"):
         an = _read_scene_animation(a)
         if an is not None:
