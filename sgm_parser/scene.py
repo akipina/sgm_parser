@@ -499,9 +499,12 @@ def read_txr(path: str):
 
 
 def _read_scene_animation(anim: FormChunk):
-    """Decode one scene ``FORM ANIM`` into an :class:`Animation`. Scene animations are the v7
-    layout (root world translation + per-bone rotation, normalized time) with **little-endian**
-    name length-prefixes — distinct from the creature decoder in ``anim.py``, which stays untouched."""
+    """Decode one scene ``FORM ANIM`` into an :class:`Animation`. Bone-track (``BANM``) layout
+    verified byte-exact against the ObjectEditor reader (RenderAnim/AnimStream.h, FUN_004f3710/
+    FUN_004f3840): a translation channel then a rotation channel, each ``u32 count`` + ``count``
+    keys, then a trailing version flag. **Time is the FIRST float of every key** (normalized 0..1),
+    NOT the last: translation key = (time, x, y, z); rotation key = (time, qx, qy, qz, qw). Names are
+    little-endian length-prefixed. (Separate from the creature decoder in ``anim.py``, untouched.)"""
     info = next((c for c in anim.children if c.tag == "INFO"), None)
     if info is None:
         return None
@@ -520,18 +523,18 @@ def _read_scene_animation(anim: FormChunk):
         bd = c.raw
         bnl = struct.unpack_from("<I", bd, 0)[0]; bo = 4 + bnl
         bname = bd[4:4 + bnl].decode("latin1", "ignore").split("\x00", 1)[0]
-        if bo + 12 > len(bd):
+        if bo + 4 > len(bd):
             return None
-        ntrans, mid, unk1 = struct.unpack_from("<III", bd, bo); bo += 12
-        body = len(bd) - bo
-        trans_bytes = ntrans * 16
-        if trans_bytes > body or (body - trans_bytes) % 20 != 0:
+        tc = struct.unpack_from("<I", bd, bo)[0]; bo += 4         # translation channel
+        if bo + tc * 16 + 4 > len(bd):
             return None
-        trans = [struct.unpack_from("<4f", bd, bo + i * 16) for i in range(ntrans)]
-        bo += trans_bytes
-        rot = [struct.unpack_from("<5f", bd, bo + i * 20) for i in range((body - trans_bytes) // 20)]
-        out.tracks.append(BoneTrack(bone_name=bname, rot_keys=rot, trans_keys=trans,
-                                    header_mid=mid, header_unk1=unk1))
+        trans = [struct.unpack_from("<4f", bd, bo + i * 16) for i in range(tc)]   # (time, x, y, z)
+        bo += tc * 16
+        rc = struct.unpack_from("<I", bd, bo)[0]; bo += 4         # rotation channel
+        if bo + rc * 20 > len(bd):
+            return None
+        rot = [struct.unpack_from("<5f", bd, bo + i * 20) for i in range(rc)]     # (time, qx,qy,qz,qw)
+        out.tracks.append(BoneTrack(bone_name=bname, rot_keys=rot, trans_keys=trans))
     return out
 
 
