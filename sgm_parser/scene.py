@@ -73,9 +73,11 @@ class Scene:
     textures: List[str] = field(default_factory=list)     # "Data:Art/Textures/NAME.txr"
     materials: List[str] = field(default_factory=list)     # SHDR names
     material_textures: "dict" = field(default_factory=dict)  # SHDR name -> texture ref (path or name)
+    material_colors: "dict" = field(default_factory=dict)    # SHDR name -> (r,g,b,a) diffuse (untextured)
     embedded_textures: "dict" = field(default_factory=dict)  # texture name -> (w, h, rgba) (buildings)
     animations: List = field(default_factory=list)         # anim.Animation (bone clips, characters)
     # building damage-state clips: (name, {morph_index: weight}) decoded from CANM channels
+    # (name, {morph_index: [(time, weight), ...]}) -- full keyframe series per morph (time 0..1)
     morph_animations: List[Tuple[str, "dict"]] = field(default_factory=list)
 
     @property
@@ -656,17 +658,24 @@ def read_scene(path: str) -> Scene:
             continue
         name = nm.raw.split(b"\x00", 1)[0].decode("latin1", "ignore")
         scene.materials.append(name)
-        # the diffuse texture ref is an LE length-prefixed string at offset 12 of a CHAN: a plain
-        # name ("Foundry_01.txr", buildings) or a "Data:Art/Textures/..." path (characters).
+        # Each CHAN: u32 channel index, u32, u32 packed diffuse colour (0xAARRGGBB), u32 texture-path
+        # length (0 if none) + path. Channel 0 is diffuse: its texture ref (a plain "Foundry_01.txr"
+        # / "Data:Art/Textures/..." path) OR, for untextured colour materials (e.g. cannister's
+        # Metal/Glass/GreenGoo), its solid colour at offset 8.
         for ch in (c for c in sh.children if c.tag == "CHAN"):
             if len(ch.raw) < 16:
                 continue
+            chan_idx = struct.unpack_from("<I", ch.raw, 0)[0]
             n = struct.unpack_from("<I", ch.raw, 12)[0]
             if 0 < n <= 256:
                 ref = ch.raw[16:16 + n].decode("latin1", "ignore")
                 if ref.lower().endswith(".txr") or ref.startswith("Data:"):
                     scene.material_textures[name] = ref
                     break
+            if chan_idx == 0 and name not in scene.material_colors:
+                c = struct.unpack_from("<I", ch.raw, 8)[0]      # 0xAARRGGBB
+                scene.material_colors[name] = (((c >> 16) & 0xFF) / 255.0, ((c >> 8) & 0xFF) / 255.0,
+                                               (c & 0xFF) / 255.0, ((c >> 24) & 0xFF) / 255.0)
     # embedded textures (buildings/props bundle their TXTR in the .sgm; keep the largest per name)
     for t in _walk(sgm, "TXTR"):
         nm = next((c for c in t.children if c.tag == "NAME"), None)
@@ -692,14 +701,19 @@ def read_scene(path: str) -> Scene:
 
 
 def _read_morph_animation(anim: FormChunk):
-    """Decode a building ``ANIM`` whose ``CANM`` channels (type 2) set morph weights ->
-    ``(name, {morph_index: weight})``. Returns None if it has no morph channels."""
+    """Decode an ``ANIM`` whose ``CANM`` channels (type 2) drive morph weights over time ->
+    ``(name, {morph_index: [(time, weight), ...]})``. Keeps the FULL keyframe series per morph so
+    time-varying morph animations play (e.g. fx/flubber: a blob whose 4 morphs trace smooth 0..1
+    curves); discrete-state morphs (building damage: one key per morph) are just length-1 series.
+    A morph can have several CANM channels (an enable flag with one key + the animated track); keep
+    the one with the MOST keys. Returns None if there are no morph channels."""
     info = next((c for c in anim.children if c.tag == "INFO"), None)
     if info is None:
         return None
     nl = struct.unpack_from("<I", info.raw, 0)[0]
     name = info.raw[4:4 + nl].decode("latin1", "ignore").split("\x00", 1)[0]
-    weights = {}
+    frames = struct.unpack_from("<I", info.raw, 4 + nl + 8)[0] if 4 + nl + 12 <= len(info.raw) else 1
+    tracks = {}
     for c in anim.children:
         if c.tag != "CANM" or len(c.raw) < 8:
             continue
@@ -710,8 +724,8 @@ def _read_morph_animation(anim: FormChunk):
             continue
         midx = struct.unpack_from("<I", c.raw, o)[0]
         kc = struct.unpack_from("<I", c.raw, o + 8)[0]
-        vals = [struct.unpack_from("<2f", c.raw, o + 12 + k * 8)[1]
+        keys = [struct.unpack_from("<2f", c.raw, o + 12 + k * 8)        # (time, weight)
                 for k in range(kc) if o + 12 + k * 8 + 8 <= len(c.raw)]
-        if vals:
-            weights[midx] = vals[-1]               # final weight this clip drives the morph to
-    return (name, weights) if weights else None
+        if keys and len(keys) > len(tracks.get(midx, [])):   # prefer the animated track over an enable flag
+            tracks[midx] = keys
+    return (name, frames, tracks) if tracks else None
