@@ -241,7 +241,9 @@ def _spray(effect, P, t, fps, duration, particle_fx=None):
     sub = Params(particle_fx) if particle_fx is not None else None
     sub_dur = duration_of(particle_fx, 0.4) if particle_fx is not None else 0.4
     dyn = int(P.num("Particle_Dynamics", 0))
-    grav = 1.0 if dyn in (1, 2, 3) else 0.0           # dynamics enum: 1/2/3 = gravity variants
+    # Particle_Dynamics enum (FXTool FUN_004e738e): 0 Forward, 1 Gravity(Die), 2 Gravity(Bounce),
+    # 3 Gravity(Stick), 4 Wind, 5 Water, 6 Local, 7 Land, 8 Gravity(Ignore), 9 Surface.
+    grav = 1.0 if dyn in (1, 2, 3, 8) else 0.0        # gravity applies to the Gravity(*) modes
     out = _empty(P)
     out["texture"] = _texture(sub) if sub else ""
     out["blend"] = _blend(sub) if sub else _blend(P)
