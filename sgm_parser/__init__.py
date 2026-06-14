@@ -35,7 +35,7 @@ from .attributes import Attributes
 from .limbscale import LimbScale
 from .validate import check_model, check_creature_assets, write_torso_bmp
 from .scene import Scene, SceneMesh, SceneBone, Submesh, read_scene, is_scene, read_txr, write_scene_geometry, write_scene_rebuilt, build_pmsh_data, patch_pmsh_geometry, encode_txr, patch_scene_textures, decode_txtr, decode_geom
-from . import anim, creature, ebp, fxlua, attributes, limbscale, luatable, validate, scene
+from . import anim, creature, ebp, fxlua, fxsim, attributes, limbscale, luatable, validate, scene
 
 __all__ = [
     "Sgm",
