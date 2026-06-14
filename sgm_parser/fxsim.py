@@ -231,27 +231,31 @@ def _trail(P, t, path):
     return out
 
 
-def _spray(effect, P, t, fps, duration):
-    """STYLE_SPRAY (preview): replay emission 0->t. Each particle is a small billboard moving
-    ballistically (semi-implicit Euler with optional gravity). Renders the emission pattern; the real
-    engine renders each particle as its Particle_Fx sub-effect (TODO: recurse)."""
-    out = _empty(P)
-    dt = 1.0 / max(fps, 1)
-    nframes = max(1, int(round(t * duration * fps)))
-    direction_axis = (0.0, 1.0, 0.0)
+def _spray(effect, P, t, fps, duration, particle_fx=None):
+    """STYLE_SPRAY: an EMITTER. It draws nothing itself -- each spawned particle is a full nested FX
+    instance of ``Particle_Fx`` (e.g. chemspray_spray -> CHEMSPRAY_RING: an expanding goo-ring
+    billboard), seeded with a cone velocity, living for the sub-fx's own Duration, aging 0->1 and
+    rendered as the sub-fx. We replay emission 0->t (deterministic per-particle seed), give each
+    particle a position via closed-form ballistics, and render the alive ones as the sub-fx at their
+    own age. (Verified vs FXSpray.cpp: Particle_Fx at +0x88; particle owns its motion+lifetime.)"""
+    sub = Params(particle_fx) if particle_fx is not None else None
+    sub_dur = duration_of(particle_fx, 0.4) if particle_fx is not None else 0.4
     dyn = int(P.num("Particle_Dynamics", 0))
-    grav_scale = 0.0 if dyn == 0 else 1.0
+    grav = 1.0 if dyn in (1, 2, 3) else 0.0           # dynamics enum: 1/2/3 = gravity variants
+    out = _empty(P)
+    out["texture"] = _texture(sub) if sub else ""
+    out["blend"] = _blend(sub) if sub else _blend(P)
+    dt = 1.0 / max(fps, 1)
+    total = duration * fps
+    cur = max(1, int(round(t * total)))
     carry = 0.0
     gidx = 0
-    alive = []           # (pos[list3], vel[list3])
-    for k in range(nframes):
-        tk = (k / (duration * fps)) if duration * fps > 0 else 0.0
+    born = []            # (birth_frame, pos0(x,y,z), vel(x,y,z))
+    for k in range(cur):
+        tk = (k / total) if total > 0 else 0.0
         rate = P.at("Emitter_Rate", tk, 0.0) or 0.0
         dev = math.radians(P.at("Emitter_Deviation", tk, 0.0) or 0.0)
-        speed = P.at("Emitter_Speed", tk, None)
-        if speed is None:
-            speed = P.at("Particle_Speed", tk, 3.0)
-        speed = float(speed or 3.0)
+        speed = float(P.at("Particle_Speed", tk, 1.0) or 1.0)
         offset = P.at("Emitter_Offset", tk, [0, 0, 0]) or [0, 0, 0]
         vol = P.at("Emitter_Volume", tk, [0, 0, 0]) or [0, 0, 0]
         carry += rate * dt
@@ -267,22 +271,31 @@ def _spray(effect, P, t, fps, duration):
             px = offset[0] + (rng.random() - 0.5) * (vol[0] if len(vol) > 0 else 0)
             py = offset[1] + (rng.random() - 0.5) * (vol[1] if len(vol) > 1 else 0)
             pz = offset[2] + (rng.random() - 0.5) * (vol[2] if len(vol) > 2 else 0)
-            alive.append(([px, py, pz], [d[0] * speed, d[1] * speed, d[2] * speed]))
-        for pos, vel in alive:
-            vel[0] += GRAVITY[0] * dt * grav_scale
-            vel[1] += GRAVITY[1] * dt * grav_scale
-            vel[2] += GRAVITY[2] * dt * grav_scale
-            pos[0] += vel[0] * dt
-            pos[1] += vel[1] * dt
-            pos[2] += vel[2] * dt
-    for pos, _vel in alive:
-        out["billboards"].append((tuple(pos), 0.12, (1.0, 1.0, 1.0, 0.9), 0.0))
+            born.append((k, (px, py, pz), (d[0] * speed, d[1] * speed, d[2] * speed)))
+    for birth, p0, vel in born:
+        e = (cur - birth) * dt                         # elapsed seconds since spawn
+        if e > sub_dur:                                # particle (sub-fx) has expired
+            continue
+        pos = (p0[0] + vel[0] * e,
+               p0[1] + vel[1] * e + 0.5 * GRAVITY[1] * grav * e * e,
+               p0[2] + vel[2] * e)
+        if sub is not None:
+            age = e / sub_dur if sub_dur > 0 else 0.0
+            radius = sub.at("Radius", age, 0.4) or 0.4
+            colour = sub.at("Colour", age, [1, 1, 1, 0.3]) or [1, 1, 1, 0.3]
+            spin = sub.at("Spin", age, 0.0) or 0.0
+            out["billboards"].append((pos, max(2 * float(radius), 0.03), tuple(colour[:4]),
+                                      math.radians(float(spin)) * age))
+        else:
+            out["billboards"].append((pos, 0.12, (1.0, 1.0, 1.0, 0.9), 0.0))
     return out
 
 
-def simulate(effect, t, fps=30.0, duration=None, emitter_path=None, beam_endpoint=(0.0, 0.0, 3.0)):
-    """Simulate `effect` at normalized time t in [0,1]; return the primitive bundle.
-    `emitter_path` (for trails) is a list of (norm_time, pos(x,y,z)); `duration` overrides the effect's."""
+def simulate(effect, t, fps=30.0, duration=None, emitter_path=None, beam_endpoint=(0.0, 0.0, 3.0),
+             particle_fx=None):
+    """Simulate `effect` at normalized time t in [0,1]; return the primitive bundle. `emitter_path`
+    (for trails) is a list of (norm_time, pos(x,y,z)); `duration` overrides the effect's; `particle_fx`
+    is the resolved sub-effect a SPRAY spawns each particle as (its Particle_Fx)."""
     P = Params(effect)
     style = (effect.style or "").upper()
     if duration is None:
@@ -294,5 +307,5 @@ def simulate(effect, t, fps=30.0, duration=None, emitter_path=None, beam_endpoin
     if "TRAIL" in style:
         return _trail(P, t, emitter_path or [(0.0, (0, 0, 0))])
     if "SPRAY" in style:
-        return _spray(effect, P, t, fps, duration)
+        return _spray(effect, P, t, fps, duration, particle_fx)
     return _empty(P)        # COMBO/CONDITIONAL handled by the binder (compose sub-fx)
